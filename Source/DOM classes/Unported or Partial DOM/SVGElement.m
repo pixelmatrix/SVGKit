@@ -588,8 +588,8 @@
     NSString* localStyleValue = [self.style getPropertyValue:stylableProperty];
     
     if( localStyleValue != nil )
-        return localStyleValue;
-    
+        return [self resolveCSSVariable:localStyleValue defaultValue:nil];
+
     /** we have a locally declared CSS class; let's go hunt for it in the document's stylesheets */
     
     @autoreleasepool /** DOM / CSS is insanely verbose, so this is likely to generate a lot of crud objects */
@@ -626,13 +626,13 @@
         }
         
         if( mostSpecificRule != nil )
-            return [mostSpecificRule.style getPropertyValue:stylableProperty];
+            return [self resolveCSSVariable:[mostSpecificRule.style getPropertyValue:stylableProperty] defaultValue:nil];
     }
     
     /** if there's a local property, use that */
     if( [self hasAttribute:stylableProperty])
-        return [self getAttribute:stylableProperty];
-    
+        return [self resolveCSSVariable:[self getAttribute:stylableProperty] defaultValue:nil];
+
     if( inherit )
     {
         /** Finally: move up the tree until you find a <G> or <SVG> node, and ask it to provide the value
@@ -652,13 +652,61 @@
         }
         else
         {
-            return [((SVGElement*)parentElement) cascadedValueForStylableProperty:stylableProperty];
+            return [self resolveCSSVariable:[((SVGElement*)parentElement) cascadedValueForStylableProperty:stylableProperty] defaultValue:nil];
         }
     }
     else
     {
         return nil;
     }
+}
+
+- (NSString *)resolveCSSVariable:(NSString *)variableName defaultValue:(NSString *)defaultValue {
+    // Check if the input is a CSS variable reference
+    if (![variableName hasPrefix:@"var("]) {
+        return variableName; // Not a variable reference, return as is
+    }
+
+    // Extract the variable name and default value from the reference
+    NSString *varContent = [variableName substringWithRange:NSMakeRange(4, [variableName length] - 5)];
+    NSArray *parts = [varContent componentsSeparatedByString:@","];
+    NSString *actualVarName = [parts[0] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    NSString *varDefaultValue = parts.count > 1 ? [parts[1] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]] : defaultValue;
+
+    // Start from the current element and traverse up the tree
+    SVGElement *currentElement = self;
+    while (currentElement != nil) {
+        // Check inline style
+        NSString *inlineValue = [currentElement.style getPropertyValue:actualVarName];
+        if (inlineValue) {
+            return [self resolveCSSVariable:inlineValue defaultValue:varDefaultValue]; // Recursively resolve if it's another variable
+        }
+
+        // Check stylesheets
+        for (StyleSheet *genericSheet in currentElement.rootOfCurrentDocumentFragment.styleSheets.internalArray) {
+            if ([genericSheet isKindOfClass:[CSSStyleSheet class]]) {
+                CSSStyleSheet *cssSheet = (CSSStyleSheet *)genericSheet;
+                for (CSSRule *genericRule in cssSheet.cssRules.internalArray) {
+                    if ([genericRule isKindOfClass:[CSSStyleRule class]]) {
+                        CSSStyleRule *styleRule = (CSSStyleRule *)genericRule;
+                        NSInteger specificity = 0;
+                        if ([self styleRule:styleRule appliesTo:currentElement specificity:&specificity]) {
+                            NSString *ruleValue = [styleRule.style getPropertyValue:actualVarName];
+                            if (ruleValue) {
+                                return [self resolveCSSVariable:ruleValue defaultValue:varDefaultValue]; // Recursively resolve if it's another variable
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Move up to the parent element
+        currentElement = (SVGElement *)currentElement.parentNode;
+    }
+
+    // If no value is found, return the default value
+    return varDefaultValue ? varDefaultValue : actualVarName; // Return the variable name if no default value is provided
 }
 
 @end
